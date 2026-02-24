@@ -28,3 +28,6 @@ int segment(cv::Mat &binary, cv::Mat &regionMap, cv::Mat &stats, cv::Mat &centro
 int colorRegions(cv::Mat &regionMap, cv::Mat &dst, int numLabels);
 
 #endif
+// Utilities for Task 9 (from utilities.cpp)
+int getEmbedding(cv::Mat &src, cv::Mat &embedding, cv::dnn::Net &net, int debug);
+void prepEmbeddingImage(cv::Mat &frame, cv::Mat &embimage, int cx, int cy, float theta, float minE1, float maxE1, float minE2, float maxE2, int debug);

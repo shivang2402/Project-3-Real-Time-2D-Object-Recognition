@@ -18,6 +18,8 @@
 #include "vision.h"
 #include "features.h"
 #include <iostream>
+#include <fstream>
+#include <map>
 #include <opencv2/opencv.hpp>
 
 int main(int argc, char *argv[]) {
@@ -71,7 +73,7 @@ int main(int argc, char *argv[]) {
     cv::namedWindow("Original", cv::WINDOW_AUTOSIZE);
     cv::namedWindow("Output", cv::WINDOW_AUTOSIZE);
 
-    std::string dbFile = "../data/object_db.csv";
+    std::string dbFile = "data/object_db.csv";
     char mode = 'c';
     int screenshotCount = 0;
     int minRegionSize = 5000;
@@ -187,11 +189,300 @@ int main(int argc, char *argv[]) {
         }
 
         cv::imshow("Output", display);
+        // Auto-train mode: press 'b' to batch train all images with known labels
+        // Auto-save mode: press 'a' to save t, m, s, f views of ALL images
         char key = (char)cv::waitKey(useCamera ? 10 : 0);
+
+        // Embedding classification mode: press 'e' to classify using ResNet18 embeddings
+        if (key == 'e' && !imageFiles.empty()) {
+            static cv::dnn::Net net;
+            static bool netLoaded = false;
+            static std::vector<std::string> embLabels;
+            static std::vector<cv::Mat> embVectors;
+
+            if (!netLoaded) {
+                std::string modelPath = "resnet18-v2-7.onnx";
+                net = cv::dnn::readNet(modelPath);
+                if (net.empty()) {
+                    std::cout << "Cannot load ResNet18 model from " << modelPath << std::endl;
+                } else {
+                    netLoaded = true;
+                    std::cout << "ResNet18 loaded. Building embedding DB..." << std::endl;
+
+                    std::map<std::string, std::string> labelMap = {
+                        {"img1p3", "triangle"}, {"img2P3", "squeegee"},
+                        {"img3P3", "allenkey"}, {"img4P3", "chisel"}, {"img5P3", "keyfob"},
+                        {"obj1", "chair"}, {"obj2", "mug"}, {"obj3", "stand"},
+                        {"obj5", "desk"}
+                    };
+
+                    for (int idx = 0; idx < (int)imageFiles.size(); idx++) {
+                        cv::Mat img = cv::imread(imageFiles[idx]);
+                        if (img.empty()) continue;
+
+                        std::string base = imageFiles[idx];
+                        size_t slash = base.find_last_of("/");
+                        size_t dot = base.find_last_of(".");
+                        std::string name = base.substr(slash + 1, dot - slash - 1);
+
+                        if (labelMap.find(name) == labelMap.end()) continue;
+
+                        cv::Mat bin, cln, rmap, st, cent;
+                        threshold(img, bin);
+                        morphCleanup(bin, cln);
+                        int nl = segment(cln, rmap, st, cent, minRegionSize);
+
+                        int bestRegion = -1, bestArea = 0;
+                        for (int i = 1; i < nl; i++) {
+                            int area = st.at<int>(i, cv::CC_STAT_AREA);
+                            if (area > bestArea && area >= minRegionSize) {
+                                bestArea = area;
+                                bestRegion = i;
+                            }
+                        }
+
+                        if (bestRegion >= 0) {
+                            RegionFeatures feat = computeFeatures(rmap, bestRegion, st, cent);
+                            cv::Mat embImage;
+                            prepEmbeddingImage(img, embImage, (int)feat.cx, (int)feat.cy,
+                                (float)feat.theta, feat.minE1, feat.maxE1, feat.minE2, feat.maxE2, 0);
+
+                            if (!embImage.empty()) {
+                                cv::Mat embedding;
+                                getEmbedding(embImage, embedding, net, 0);
+                                embLabels.push_back(labelMap[name]);
+                                embVectors.push_back(embedding.clone());
+                                std::cout << "Embedded: " << name << " -> " << labelMap[name] << std::endl;
+                            }
+                        }
+                    }
+                    std::cout << "Embedding DB built with " << embLabels.size() << " samples." << std::endl;
+                }
+            }
+
+            if (netLoaded && !embVectors.empty()) {
+                // Classify current image using embeddings
+                cv::Mat img = cv::imread(imageFiles[imgIndex]);
+                cv::Mat bin, cln, rmap, st, cent;
+                threshold(img, bin);
+                morphCleanup(bin, cln);
+                int nl = segment(cln, rmap, st, cent, minRegionSize);
+
+                int bestRegion = -1, bestArea = 0;
+                for (int i = 1; i < nl; i++) {
+                    int area = st.at<int>(i, cv::CC_STAT_AREA);
+                    if (area > bestArea && area >= minRegionSize) {
+                        bestArea = area;
+                        bestRegion = i;
+                    }
+                }
+
+                if (bestRegion >= 0) {
+                    RegionFeatures feat = computeFeatures(rmap, bestRegion, st, cent);
+                    cv::Mat embImage;
+                    prepEmbeddingImage(img, embImage, (int)feat.cx, (int)feat.cy,
+                        (float)feat.theta, feat.minE1, feat.maxE1, feat.minE2, feat.maxE2, 0);
+
+                    if (!embImage.empty()) {
+                        cv::Mat queryEmb;
+                        getEmbedding(embImage, queryEmb, net, 0);
+
+                        // Find nearest neighbor using SSD
+                        double minDist = 1e30;
+                        int bestIdx = 0;
+                        for (int j = 0; j < (int)embVectors.size(); j++) {
+                            double dist = cv::norm(queryEmb, embVectors[j], cv::NORM_L2SQR);
+                            if (dist < minDist) {
+                                minDist = dist;
+                                bestIdx = j;
+                            }
+                        }
+
+                        display = frame.clone();
+                        cv::putText(display, "EMB: " + embLabels[bestIdx],
+                            cv::Point(30, 60), cv::FONT_HERSHEY_SIMPLEX, 1.5, cv::Scalar(0, 255, 0), 3);
+                        cv::imshow("Output", display);
+                        std::cout << "Embedding classification: " << embLabels[bestIdx] << " (dist=" << minDist << ")" << std::endl;
+                    }
+                }
+            }
+        }
+
+        // Confusion matrix mode: press 'x' to evaluate all labeled images
+        if (key == 'x' && !imageFiles.empty()) {
+            std::map<std::string, std::string> labelMap = {
+                {"img1p3", "triangle"}, {"img2P3", "squeegee"},
+                {"img3P3", "allenkey"}, {"img4P3", "chisel"}, {"img5P3", "keyfob"},
+                {"obj1", "chair"}, {"obj2", "mug"}, {"obj3", "stand"},
+                {"obj5", "desk"}
+            };
+
+            // Get unique labels
+            std::vector<std::string> categories = {"triangle", "squeegee", "allenkey", "chisel", "keyfob", "chair", "mug", "stand", "desk"};
+            int nc = (int)categories.size();
+            std::vector<std::vector<int>> confusion(nc, std::vector<int>(nc, 0));
+
+            std::map<std::string, int> catIdx;
+            for (int i = 0; i < nc; i++) catIdx[categories[i]] = i;
+
+            for (int idx = 0; idx < (int)imageFiles.size(); idx++) {
+                cv::Mat img = cv::imread(imageFiles[idx]);
+                if (img.empty()) continue;
+
+                std::string base = imageFiles[idx];
+                size_t slash = base.find_last_of("/");
+                size_t dot = base.find_last_of(".");
+                std::string name = base.substr(slash + 1, dot - slash - 1);
+
+                if (labelMap.find(name) == labelMap.end()) continue;
+                std::string trueLabel = labelMap[name];
+
+                cv::Mat bin, cln, rmap, st, cent;
+                threshold(img, bin);
+                morphCleanup(bin, cln);
+                int nl = segment(cln, rmap, st, cent, minRegionSize);
+
+                int bestRegion = -1, bestArea = 0;
+                for (int i = 1; i < nl; i++) {
+                    int area = st.at<int>(i, cv::CC_STAT_AREA);
+                    if (area > bestArea && area >= minRegionSize) {
+                        bestArea = area;
+                        bestRegion = i;
+                    }
+                }
+
+                if (bestRegion >= 0) {
+                    RegionFeatures feat = computeFeatures(rmap, bestRegion, st, cent);
+                    double minDist = 0;
+                    std::string predicted = classify(feat, trainLabels, trainFeatures, minDist);
+                    std::cout << name << ": true=" << trueLabel << " predicted=" << predicted << " dist=" << minDist << std::endl;
+
+                    if (catIdx.count(trueLabel) && catIdx.count(predicted)) {
+                        confusion[catIdx[trueLabel]][catIdx[predicted]]++;
+                    }
+                }
+            }
+
+            // Print confusion matrix
+            std::cout << "\nConfusion Matrix:" << std::endl;
+            std::cout << "True\\Pred\t";
+            for (auto &c : categories) std::cout << c << "\t";
+            std::cout << std::endl;
+            for (int i = 0; i < nc; i++) {
+                std::cout << categories[i] << "\t";
+                for (int j = 0; j < nc; j++) {
+                    std::cout << confusion[i][j] << "\t";
+                }
+                std::cout << std::endl;
+            }
+        }
+
+        if (key == 'b' && !imageFiles.empty()) {
+            // Label map: filename prefix -> label
+            std::map<std::string, std::string> labelMap = {
+                {"obj1", "chair"}, {"obj2", "mug"}, {"obj3", "stand"},
+                {"obj5", "desk"},
+                {"img1p3", "triangle"}, {"img2P3", "squeegee"},
+                {"img3P3", "allenkey"}, {"img4P3", "chisel"}, {"img5P3", "keyfob"}
+            };
+
+            // Clear existing DB
+            std::ofstream clearFile(dbFile, std::ios::trunc);
+            clearFile.close();
+
+            std::cout << "Auto-training..." << std::endl;
+            for (int idx = 0; idx < (int)imageFiles.size(); idx++) {
+                cv::Mat img = cv::imread(imageFiles[idx]);
+                if (img.empty()) continue;
+
+                std::string base = imageFiles[idx];
+                size_t slash = base.find_last_of("/");
+                size_t dot = base.find_last_of(".");
+                std::string name = base.substr(slash + 1, dot - slash - 1);
+
+                // Check if this image has a label
+                if (labelMap.find(name) == labelMap.end()) {
+                    std::cout << "Skipping (no label): " << name << std::endl;
+                    continue;
+                }
+
+                cv::Mat bin, cln, rmap, st, cent;
+                threshold(img, bin);
+                morphCleanup(bin, cln);
+                int nl = segment(cln, rmap, st, cent, minRegionSize);
+
+                // Find largest valid region
+                int bestRegion = -1, bestArea = 0;
+                for (int i = 1; i < nl; i++) {
+                    int area = st.at<int>(i, cv::CC_STAT_AREA);
+                    if (area > bestArea && area >= minRegionSize) {
+                        bestArea = area;
+                        bestRegion = i;
+                    }
+                }
+
+                if (bestRegion >= 0) {
+                    RegionFeatures feat = computeFeatures(rmap, bestRegion, st, cent);
+                    saveTrainingData(dbFile, labelMap[name], feat);
+                    std::cout << "Trained: " << name << " -> " << labelMap[name] << std::endl;
+                } else {
+                    std::cout << "No region found: " << name << std::endl;
+                }
+            }
+
+            // Reload
+            trainLabels.clear();
+            trainFeatures.clear();
+            loadTrainingData(dbFile, trainLabels, trainFeatures);
+            std::cout << "Done! " << trainLabels.size() << " training samples." << std::endl;
+        }
+
+        if (key == 'a' && !imageFiles.empty()) {
+            std::cout << "Auto-saving all views..." << std::endl;
+            for (int idx = 0; idx < (int)imageFiles.size(); idx++) {
+                cv::Mat img = cv::imread(imageFiles[idx]);
+                if (img.empty()) continue;
+
+                std::string base = imageFiles[idx];
+                size_t slash = base.find_last_of("/");
+                size_t dot = base.find_last_of(".");
+                std::string name = base.substr(slash + 1, dot - slash - 1);
+
+                cv::Mat bin, cln, rmap, st, cent, out;
+
+                // Threshold
+                threshold(img, bin);
+                cv::cvtColor(bin, out, cv::COLOR_GRAY2BGR);
+                cv::imwrite("data/report_" + name + "_threshold.png", out);
+
+                // Morph
+                morphCleanup(bin, cln);
+                cv::cvtColor(cln, out, cv::COLOR_GRAY2BGR);
+                cv::imwrite("data/report_" + name + "_morph.png", out);
+
+                // Segment
+                int nl = segment(cln, rmap, st, cent, minRegionSize);
+                colorRegions(rmap, out, nl);
+                cv::imwrite("data/report_" + name + "_segment.png", out);
+
+                // Features
+                out = img.clone();
+                for (int i = 1; i < nl; i++) {
+                    int area = st.at<int>(i, cv::CC_STAT_AREA);
+                    if (area < minRegionSize) continue;
+                    RegionFeatures feat = computeFeatures(rmap, i, st, cent);
+                    drawRegionInfo(out, feat);
+                }
+                cv::imwrite("data/report_" + name + "_features.png", out);
+
+                std::cout << "Saved views for: " << name << std::endl;
+            }
+            std::cout << "Done! Check data/ for report_*.png files." << std::endl;
+        }
 
         if (key == 'q' || key == 'Q') break;
         if (key == 'w' || key == 'W') {
-            std::string fname = "../data/screenshot_" + std::to_string(screenshotCount++) + ".png";
+            std::string fname = "data/screenshot_" + std::to_string(screenshotCount++) + ".png";
             cv::imwrite(fname, display);
             std::cout << "Saved: " << fname << std::endl;
         }
