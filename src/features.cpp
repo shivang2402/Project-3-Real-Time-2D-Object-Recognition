@@ -256,3 +256,30 @@ std::string classify(RegionFeatures &feat, std::vector<std::string> &labels, std
 
     return labels[bestIdx];
 }
+std::string classifyKNN(RegionFeatures &feat, std::vector<std::string> &labels, std::vector<std::vector<float>> &featureVectors, int k) {
+    if (labels.empty()) return "unknown";
+    if (k > (int)labels.size()) k = (int)labels.size();
+    std::vector<float> query = featuresToVector(feat);
+    int dim = (int)query.size();
+    int n = (int)featureVectors.size();
+    std::vector<float> means(dim, 0.0f), stdevs(dim, 0.0f);
+    for (auto &fv : featureVectors)
+        for (int i = 0; i < dim && i < (int)fv.size(); i++) means[i] += fv[i];
+    for (int i = 0; i < dim; i++) means[i] /= n;
+    for (auto &fv : featureVectors)
+        for (int i = 0; i < dim && i < (int)fv.size(); i++) { float d = fv[i]-means[i]; stdevs[i] += d*d; }
+    for (int i = 0; i < dim; i++) { stdevs[i] = sqrt(stdevs[i]/n); if (stdevs[i]<1e-6f) stdevs[i]=1.0f; }
+    std::vector<std::pair<double,int>> dists;
+    for (int j = 0; j < n; j++) {
+        double dist = 0;
+        for (int i = 0; i < dim && i < (int)featureVectors[j].size(); i++) { float d=(query[i]-featureVectors[j][i])/stdevs[i]; dist+=d*d; }
+        dists.push_back({sqrt(dist), j});
+    }
+    std::sort(dists.begin(), dists.end());
+    std::map<std::string,int> votes;
+    for (int i = 0; i < k; i++) votes[labels[dists[i].second]]++;
+    std::string best = labels[dists[0].second];
+    int bestCount = 0;
+    for (auto &p : votes) if (p.second > bestCount) { bestCount = p.second; best = p.first; }
+    return best;
+}

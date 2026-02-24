@@ -91,6 +91,12 @@ int main(int argc, char *argv[]) {
 
     cv::Mat frame, binary, cleaned, regionMap, stats, centroids, display;
 
+    // Shared embedding data
+    cv::dnn::Net embNet;
+    bool embNetLoaded = false;
+    std::vector<std::string> embLabels;
+    std::vector<cv::Mat> embVectors;
+
     for (;;) {
         // Get next frame
         if (!imageFiles.empty()) {
@@ -193,27 +199,85 @@ int main(int argc, char *argv[]) {
         // Auto-save mode: press 'a' to save t, m, s, f views of ALL images
         char key = (char)cv::waitKey(useCamera ? 10 : 0);
 
+        // Save classification results: press 'p' to save labeled images + print feature vectors
+        if (key == 'p' && !imageFiles.empty()) {
+            std::map<std::string, std::string> labelMap = {
+                {"img1p3", "triangle"}, {"img2P3", "squeegee"},
+                {"img3P3", "allenkey"}, {"img4P3", "chisel"}, {"img5P3", "keyfob"},
+                {"obj1", "chair"}, {"obj2", "mug"}, {"obj3", "stand"},
+                {"obj5", "desk"}
+            };
+
+            std::cout << "\n=== Feature Vectors ===" << std::endl;
+            for (int idx = 0; idx < (int)imageFiles.size(); idx++) {
+                cv::Mat img = cv::imread(imageFiles[idx]);
+                if (img.empty()) continue;
+
+                std::string base = imageFiles[idx];
+                size_t slash = base.find_last_of("/");
+                size_t dot = base.find_last_of(".");
+                std::string name = base.substr(slash + 1, dot - slash - 1);
+
+                if (labelMap.find(name) == labelMap.end()) continue;
+                std::string trueLabel = labelMap[name];
+
+                cv::Mat bin, cln, rmap, st, cent;
+                threshold(img, bin);
+                morphCleanup(bin, cln);
+                int nl = segment(cln, rmap, st, cent, minRegionSize);
+
+                int bestRegion = -1, bestArea = 0;
+                for (int i = 1; i < nl; i++) {
+                    int area = st.at<int>(i, cv::CC_STAT_AREA);
+                    if (area > bestArea && area >= minRegionSize) {
+                        bestArea = area;
+                        bestRegion = i;
+                    }
+                }
+
+                if (bestRegion >= 0) {
+                    RegionFeatures feat = computeFeatures(rmap, bestRegion, st, cent);
+                    std::vector<float> fv = featuresToVector(feat);
+
+                    // Print feature vector
+                    std::cout << trueLabel << ": [";
+                    for (int i = 0; i < (int)fv.size(); i++) {
+                        if (i > 0) std::cout << ", ";
+                        printf("%.4f", fv[i]);
+                    }
+                    std::cout << "]" << std::endl;
+
+                    // Save classification result image
+                    cv::Mat out = img.clone();
+                    drawRegionInfo(out, feat);
+                    double minDist = 0;
+                    std::string predicted = classify(feat, trainLabels, trainFeatures, minDist);
+                    cv::putText(out, "Label: " + predicted, cv::Point((int)feat.cx - 50, (int)feat.cy - 80),
+                                cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
+                    cv::imwrite("data/reports/classify_" + name + ".png", out);
+                    std::cout << "  Saved: data/reports/classify_" + name + ".png" << std::endl;
+                }
+            }
+            std::cout << "=== Done ===" << std::endl;
+        }
+
         // Embedding classification mode: press 'e' to classify using ResNet18 embeddings
         if (key == 'e' && !imageFiles.empty()) {
-            static cv::dnn::Net net;
-            static bool netLoaded = false;
-            static std::vector<std::string> embLabels;
-            static std::vector<cv::Mat> embVectors;
 
-            if (!netLoaded) {
+            if (!embNetLoaded) {
                 std::string modelPath = "resnet18-v2-7.onnx";
-                net = cv::dnn::readNet(modelPath);
-                if (net.empty()) {
+                embNet = cv::dnn::readNet(modelPath);
+                if (embNet.empty()) {
                     std::cout << "Cannot load ResNet18 model from " << modelPath << std::endl;
                 } else {
-                    netLoaded = true;
+                    embNetLoaded = true;
                     std::cout << "ResNet18 loaded. Building embedding DB..." << std::endl;
 
                     std::map<std::string, std::string> labelMap = {
                         {"img1p3", "triangle"}, {"img2P3", "squeegee"},
                         {"img3P3", "allenkey"}, {"img4P3", "chisel"}, {"img5P3", "keyfob"},
                         {"obj1", "chair"}, {"obj2", "mug"}, {"obj3", "stand"},
-                        {"obj5", "desk"}
+                        {"obj4", "lamp"}, {"obj5", "desk"}
                     };
 
                     for (int idx = 0; idx < (int)imageFiles.size(); idx++) {
@@ -249,7 +313,7 @@ int main(int argc, char *argv[]) {
 
                             if (!embImage.empty()) {
                                 cv::Mat embedding;
-                                getEmbedding(embImage, embedding, net, 0);
+                                getEmbedding(embImage, embedding, embNet, 0);
                                 embLabels.push_back(labelMap[name]);
                                 embVectors.push_back(embedding.clone());
                                 std::cout << "Embedded: " << name << " -> " << labelMap[name] << std::endl;
@@ -260,7 +324,7 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            if (netLoaded && !embVectors.empty()) {
+            if (embNetLoaded && !embVectors.empty()) {
                 // Classify current image using embeddings
                 cv::Mat img = cv::imread(imageFiles[imgIndex]);
                 cv::Mat bin, cln, rmap, st, cent;
@@ -285,7 +349,7 @@ int main(int argc, char *argv[]) {
 
                     if (!embImage.empty()) {
                         cv::Mat queryEmb;
-                        getEmbedding(embImage, queryEmb, net, 0);
+                        getEmbedding(embImage, queryEmb, embNet, 0);
 
                         // Find nearest neighbor using SSD
                         double minDist = 1e30;
@@ -314,11 +378,11 @@ int main(int argc, char *argv[]) {
                 {"img1p3", "triangle"}, {"img2P3", "squeegee"},
                 {"img3P3", "allenkey"}, {"img4P3", "chisel"}, {"img5P3", "keyfob"},
                 {"obj1", "chair"}, {"obj2", "mug"}, {"obj3", "stand"},
-                {"obj5", "desk"}
+                {"obj4", "lamp"}, {"obj5", "desk"}
             };
 
             // Get unique labels
-            std::vector<std::string> categories = {"triangle", "squeegee", "allenkey", "chisel", "keyfob", "chair", "mug", "stand", "desk"};
+            std::vector<std::string> categories = {"triangle", "squeegee", "allenkey", "chisel", "keyfob", "chair", "mug", "stand", "lamp", "desk"};
             int nc = (int)categories.size();
             std::vector<std::vector<int>> confusion(nc, std::vector<int>(nc, 0));
 
@@ -381,7 +445,7 @@ int main(int argc, char *argv[]) {
             // Label map: filename prefix -> label
             std::map<std::string, std::string> labelMap = {
                 {"obj1", "chair"}, {"obj2", "mug"}, {"obj3", "stand"},
-                {"obj5", "desk"},
+                {"obj4", "lamp"}, {"obj5", "desk"},
                 {"img1p3", "triangle"}, {"img2P3", "squeegee"},
                 {"img3P3", "allenkey"}, {"img4P3", "chisel"}, {"img5P3", "keyfob"}
             };
@@ -480,9 +544,65 @@ int main(int argc, char *argv[]) {
             std::cout << "Done! Check data/ for report_*.png files." << std::endl;
         }
 
+
+        // 2D Embedding plot: press 'g' to generate scatter plot
+        if (key == 'g' && !embVectors.empty()) {
+            int n = (int)embVectors.size();
+            int dim = embVectors[0].cols;
+            cv::Mat data(n, dim, CV_32F);
+            for (int i = 0; i < n; i++) embVectors[i].copyTo(data.row(i));
+            cv::PCA pca(data, cv::Mat(), cv::PCA::DATA_AS_ROW, 2);
+            cv::Mat projected;
+            pca.project(data, projected);
+            float minX=1e9, maxX=-1e9, minY=1e9, maxY=-1e9;
+            for (int i = 0; i < n; i++) {
+                float x = projected.at<float>(i,0), y = projected.at<float>(i,1);
+                if (x<minX) minX=x; if (x>maxX) maxX=x;
+                if (y<minY) minY=y; if (y>maxY) maxY=y;
+            }
+            int plotW=800, plotH=600, margin=80;
+            cv::Mat plot(plotH, plotW, CV_8UC3, cv::Scalar(255,255,255));
+            cv::Scalar colors[] = {{255,0,0},{0,255,0},{0,0,255},{255,255,0},{255,0,255},{0,255,255},{128,0,128},{0,128,128},{128,128,0}};
+            std::map<std::string, cv::Scalar> cmap;
+            int ci = 0;
+            for (auto &l : embLabels) if (cmap.find(l)==cmap.end()) cmap[l] = colors[ci++%9];
+            float rX = (maxX-minX>0)?maxX-minX:1, rY = (maxY-minY>0)?maxY-minY:1;
+            for (int i = 0; i < n; i++) {
+                int px = margin+(int)((projected.at<float>(i,0)-minX)/rX*(plotW-2*margin));
+                int py = margin+(int)((projected.at<float>(i,1)-minY)/rY*(plotH-2*margin));
+                cv::circle(plot, cv::Point(px,py), 8, cmap[embLabels[i]], -1);
+                cv::putText(plot, embLabels[i], cv::Point(px+12,py+5), cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0,0,0), 1);
+            }
+            cv::putText(plot, "2D Embedding Plot (PCA)", cv::Point(plotW/2-120,30), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0,0,0), 2);
+            cv::imshow("Embedding Plot", plot);
+            cv::imwrite("data/reports/embedding_2d_plot.png", plot);
+            std::cout << "Saved 2D embedding plot." << std::endl;
+        }
+
+
+        // KNN classification mode: press 'k'
+        if (key == 'k') {
+            display = frame.clone();
+            cv::Mat bin, cln, rmap, st, cent;
+            threshold(frame, bin);
+            morphCleanup(bin, cln);
+            int nl = segment(cln, rmap, st, cent, minRegionSize);
+            for (int i = 1; i < nl; i++) {
+                int area = st.at<int>(i, cv::CC_STAT_AREA);
+                if (area < minRegionSize) continue;
+                RegionFeatures feat = computeFeatures(rmap, i, st, cent);
+                drawRegionInfo(display, feat);
+                std::string label = classifyKNN(feat, trainLabels, trainFeatures, 3);
+                cv::putText(display, "KNN: " + label, cv::Point((int)feat.cx - 30, (int)feat.cy - 60),
+                            cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 165, 255), 2);
+            }
+            cv::imshow("Output", display);
+            std::cout << "KNN classification shown." << std::endl;
+        }
+
         if (key == 'q' || key == 'Q') break;
         if (key == 'w' || key == 'W') {
-            std::string fname = "data/screenshot_" + std::to_string(screenshotCount++) + ".png";
+            std::string fname = "../data/screenshot_" + std::to_string(screenshotCount++) + ".png";
             cv::imwrite(fname, display);
             std::cout << "Saved: " << fname << std::endl;
         }

@@ -37,6 +37,7 @@ int saveTrainingData(const std::string &filename, const std::string &label, Regi
 int loadTrainingData(const std::string &filename, std::vector<std::string> &labels, std::vector<std::vector<float>> &featureVectors);
 
 // Task 6: Classify using scaled Euclidean distance (nearest neighbor)
+std::string classifyKNN(RegionFeatures &feat, std::vector<std::string> &labels, std::vector<std::vector<float>> &featureVectors, int k);
 std::string classify(RegionFeatures &feat, std::vector<std::string> &labels, std::vector<std::vector<float>> &featureVectors, double &minDist);
 
 // Convert RegionFeatures to a flat feature vector for comparison
