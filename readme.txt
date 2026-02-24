@@ -3,7 +3,7 @@ Name: Shivang Patel
 Operating System: macOS (Apple Silicon, Homebrew)
 IDE: Terminal + clang++ (C++17)
 
-Video Link: [INSERT LINK HERE]
+Video Link: https://drive.google.com/file/d/1pUuyKR1Qcm0uSmvZBkKftqwSiDppgfr3/view?usp=sharing
 
 Instructions for running:
   cd src && make objrec && cd ..
