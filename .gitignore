@@ -1,0 +1,7 @@
+bin/
+src/*.o
+data/
+*.zip
+*.onnx
+__MACOSX/
+.DS_Store
